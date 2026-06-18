@@ -81,6 +81,7 @@ osv-image-init image="" app_objects="" extra_cxxflags="":
             make -C benchmarks/{{image}} lib
             _app_objects="benchmarks/{{image}}/{{image}}_app.o"
             _app_libs="benchmarks/{{image}}/lib{{image}}.a"
+            extra="$extra lto=1"
         fi
     fi
     # Auto-derive extra_cxxflags via print-extra-cxxflags if not specified
