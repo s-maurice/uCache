@@ -109,6 +109,7 @@
 
                     ];
                     nativeBuildInputs = with pkgs; [
+                        bear
                         autoconf
                         automake
                         binutils

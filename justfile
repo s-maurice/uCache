@@ -7,6 +7,19 @@ ssd_id := 'c3:00.0'
 help:
     just --list
 
+sync-push remote rpath:
+    git ls-files -z --recurse-submodules | rsync -avz --from0 --files-from=- {{proot}}/ {{remote}}:{{rpath}}/
+
+sync-pull remote rpath:
+    rsync -avz {{remote}}:{{rpath}}/compile_commands.json {{invocation_directory()}}/
+    # rewrite remote paths so clangd can chdir to `directory` and resolve relative -I paths
+    sed -i 's|{{rpath}}|{{invocation_directory()}}|g' {{invocation_directory()}}/compile_commands.json
+
+gen-compile-commands remote rpath image="integrated_vmcache_tabby":
+    just sync-push {{remote}} {{rpath}}
+    ssh {{remote}} "cd {{rpath}} && nix develop --command bash -c 'cd osv && bear --output ../compile_commands.json -- ./scripts/build -j fs=ramfs image={{image}}'"
+    just sync-pull {{remote}} {{rpath}}
+
 ssh COMMAND="":
     @ ssh \
     -i {{proot}}/nix/keyfile \
@@ -88,6 +101,57 @@ osv_vm nb_cpu="1" size_mem_giga="4G" image="" extra_args="": (bind-ssd-vfio ssd_
     -chardev stdio,mux=on,id=stdio,signal=off \
     -mon chardev=stdio,mode=readline \
     -device isa-serial,chardev=stdio
+
+osv_vm_profile nb_cpu="1" size_mem_giga="4G" image="" extra_args="": (bind-ssd-vfio ssd_id) check_downgraded_link
+    #!/usr/bin/env bash
+    {{proot}}/osv/scripts/imgedit.py setargs {{proot}}/VMs/osv_{{image}}.img "--sampler=1000 --trace=sampler_tick --noshutdown {{extra_args}}"
+    let "taskset_cores = {{nb_cpu}}-1"
+    sudo taskset -c 0-$taskset_cores qemu-system-x86_64 \
+    -m {{size_mem_giga}} \
+    -smp {{nb_cpu}} \
+    -vnc :1 \
+    -device virtio-blk-pci,id=blk0,drive=hd0,scsi=off,bootindex=0 \
+    -drive file={{proot}}/VMs/osv_{{image}}.img,if=none,id=hd0,cache=none,aio=native \
+    -device vfio-pci,host={{ssd_id}} \
+    -netdev user,id=un0,net=192.168.122.0/24,host=192.168.122.1,hostfwd=tcp::8000-:8000 \
+    -device virtio-net-pci,netdev=un0 \
+    -device virtio-rng-pci \
+    -enable-kvm \
+    -cpu host,+x2apic \
+    -chardev stdio,mux=on,id=stdio,signal=off \
+    -mon chardev=stdio,mode=readline \
+    -device isa-serial,chardev=stdio \
+    -s
+
+trace-extract tracefile="traces.bin":
+    cd {{proot}}/osv && python3 scripts/trace.py extract -e build/last/loader.elf -r localhost:1234 {{proot}}/{{tracefile}}
+
+trace-summary tracefile="traces.bin":
+    cd {{proot}}/osv && python3 scripts/trace.py summary {{proot}}/{{tracefile}}
+
+trace-prof tracefile="traces.bin":
+    cd {{proot}}/osv && python3 scripts/trace.py prof -e build/last/loader.elf -S {{proot}}/{{tracefile}}
+
+osv_vm_debug nb_cpu="1" size_mem_giga="4G" image="" extra_args="": (bind-ssd-vfio ssd_id) check_downgraded_link
+    #!/usr/bin/env bash
+    {{proot}}/osv/scripts/imgedit.py setargs {{proot}}/VMs/osv_{{image}}.img "{{extra_args}}"
+    let "taskset_cores = {{nb_cpu}}-1"
+    sudo taskset -c 0-$taskset_cores qemu-system-x86_64 \
+    -m {{size_mem_giga}} \
+    -smp {{nb_cpu}} \
+    -vnc :1 \
+    -device virtio-blk-pci,id=blk0,drive=hd0,scsi=off,bootindex=0 \
+    -drive file={{proot}}/VMs/osv_{{image}}.img,if=none,id=hd0,cache=none,aio=native \
+    -device vfio-pci,host={{ssd_id}} \
+    -netdev user,id=un0,net=192.168.122.0/24,host=192.168.122.1 \
+    -device virtio-net-pci,netdev=un0 \
+    -device virtio-rng-pci \
+    -enable-kvm \
+    -cpu host,+x2apic \
+    -chardev stdio,mux=on,id=stdio,signal=off \
+    -mon chardev=stdio,mode=readline \
+    -device isa-serial,chardev=stdio \
+    -s
 
 bind-ssd-vfio pci_id="":
     #!/usr/bin/env bash

@@ -1,4 +1,4 @@
-import? "../justfile"
+# import? "../justfile"
 
 build_images:
   just linux-image-init
