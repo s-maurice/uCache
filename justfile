@@ -70,15 +70,34 @@ linux-image-init:
     nix build .#linux-image --out-link {{proot}}/VMs/ro
     overwrite linux-image
 
-osv-image-init image="":
+osv-image-init image="" app_objects="" extra_cxxflags="":
     #!/usr/bin/env bash
     cd {{proot}}/osv/
-    if [ ! -d build/last/tools ]; then
-      ./scripts/build -j image={{image}}
+    _app_objects="{{app_objects}}"
+    _app_libs=""
+    if [[ -z "$_app_objects" ]]; then
+        if [[ -f "benchmarks/{{image}}/{{image}}_app.cc" ]]; then
+            # static-lib style: benchmark compiled separately, thin wrapper linked into kernel
+            make -C benchmarks/{{image}} lib
+            _app_objects="benchmarks/{{image}}/{{image}}_app.o"
+            _app_libs="benchmarks/{{image}}/lib{{image}}.a"
+        fi
     fi
-    ./scripts/build -j fs=ramfs image={{image}}
+    # Auto-derive extra_cxxflags via print-extra-cxxflags if not specified
+    _extra_cxxflags="{{extra_cxxflags}}"
+    if [[ -z "$_extra_cxxflags" && -f "benchmarks/{{image}}/Makefile" ]]; then
+        _extra_cxxflags=$(make -sC benchmarks/{{image}} print-extra-cxxflags 2>/dev/null || true)
+    fi
+    if [ ! -d build/last/tools ]; then
+        ./scripts/build -j APP_OBJECTS="$_app_objects"
+    fi
+    extra=""
+    [[ -n "$_app_objects" ]] && extra="$extra APP_OBJECTS=\"$_app_objects\""
+    [[ -n "$_app_libs" ]] && extra="$extra APP_LIBS=\"$_app_libs\""
+    [[ -n "$_extra_cxxflags" ]] && extra="$extra EXTRA_CXXFLAGS=\"$_extra_cxxflags\""
+    eval ./scripts/build -j fs=ramfs image={{image}} $extra
     if [[ "{{image}}" == *"duckdb"* ]]; then
-      ./scripts/build -j fs=ramfs image={{image}}
+        eval ./scripts/build -j fs=ramfs image={{image}} $extra
     fi
     cp {{proot}}/osv/build/last/usr.img {{proot}}/VMs/osv_{{image}}.img
 
