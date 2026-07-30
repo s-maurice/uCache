@@ -17,8 +17,17 @@ sync-pull remote rpath:
 
 gen-compile-commands remote rpath image="integrated_vmcache_tabby":
     just sync-push {{remote}} {{rpath}}
-    ssh {{remote}} "cd {{rpath}} && nix develop --command bash -c 'cd osv && bear --output ../compile_commands.json -- ./scripts/build -j fs=ramfs image={{image}}'"
+    ssh {{remote}} "cd {{rpath}} && nix develop --command bash -c 'cd osv && bear --append --output ../compile_commands.json -- ./scripts/build -j fs=ramfs image={{image}}'"
     just sync-pull {{remote}} {{rpath}}
+
+gen-compile-commands-duckdb remote rpath:
+    just sync-push {{remote}} {{rpath}}
+    ssh {{remote}} "cd {{rpath}} && nix develop --command bash -c 'cd osv && bear --append --output ../compile_commands.json -- just build-duckdb && jq -s add ../compile_commands.json build/release.x64/duckdb/compile_commands.json > /tmp/cc_merged.json && mv /tmp/cc_merged.json ../compile_commands.json'"
+    just sync-pull {{remote}} {{rpath}}
+
+clear-compile-commands remote rpath:
+    ssh {{remote}} "rm -f {{rpath}}/compile_commands.json"
+    rm -f {{invocation_directory()}}/compile_commands.json
 
 ssh COMMAND="":
     @ ssh \
@@ -75,6 +84,10 @@ osv-image-init image="" app_objects="" extra_cxxflags="":
     cd {{proot}}/osv/
     _app_objects="{{app_objects}}"
     _app_libs=""
+    # Generated headers, needed by benchmarks that include OSv headers.
+    if [ ! -d build/release.x64/gen/include ]; then
+        make -j build/release.x64/gen/include/osv/version.h
+    fi
     if [[ -z "$_app_objects" ]]; then
         if [[ -f "benchmarks/{{image}}/{{image}}_app.cc" ]]; then
             # static-lib style: benchmark compiled separately, thin wrapper linked into kernel
@@ -92,6 +105,8 @@ osv-image-init image="" app_objects="" extra_cxxflags="":
     if [ ! -d build/last/tools ]; then
         ./scripts/build -j APP_OBJECTS="$_app_objects"
     fi
+    # Pre-build mount tools to work around parallel build race condition
+    make build/release.x64/tools/mount/mount-fs.so build/release.x64/tools/mount/umount.so 2>/dev/null || true
     extra=""
     [[ -n "$_app_objects" ]] && extra="$extra APP_OBJECTS=\"$_app_objects\""
     [[ -n "$_app_libs" ]] && extra="$extra APP_LIBS=\"$_app_libs\""

@@ -78,6 +78,7 @@
                         python3.pkgs.pandas
                         pkgs.libaio
                         niwa-pkgs.driverctl
+                        e2fsprogs
 
                         # duckdb
                         cmake
