@@ -49,19 +49,22 @@ ucache-cold variant memfit mem cache:
     #!/usr/bin/env bash
     set -uo pipefail
     RF="{{result_file}}"; mkdir -p "$(dirname "$RF")"
-    [ -f "$RF" ] || echo "system,variant,memfit,style,query,repetition,time,read_bytes,prefetch_used,peak_used,min_huge_blocks" > "$RF"
+    [ -f "$RF" ] || echo "system,variant,memfit,style,query,repetition,time,metadata_time,read_bytes,prefetch_used,peak_used,min_huge_blocks" > "$RF"
     for q in {{queries}}; do
         echo "==> [ucache/{{variant}}] cold memfit={{memfit}} q=$q (cache={{cache}})"
+        # </dev/null is needed: `timeout` puts QEMU in its own process group,
+        # where touching the controlling tty stops it on SIGTTIN/SIGTTOU.
         out=$(timeout {{timeout_s}} bash -c \
-            "cd {{proot}}/osv && just run-duckdb $q 1 {{mem}} {{vcpus}} {{cache}} {{ddb_mem}} 2048 2048" 2>&1)
+            "cd {{proot}}/osv && just run-duckdb $q 1 {{mem}} {{vcpus}} {{cache}} {{ddb_mem}} 2048 2048" 2>&1 </dev/null)
         if [ $? -ne 0 ]; then
-            echo "ucache,{{variant}},{{memfit}},cold,$q,1,OOM,na,na,na,na" >> "$RF"
+            echo "ucache,{{variant}},{{memfit}},cold,$q,1,OOM,na,na,na,na,na" >> "$RF"
         else
             echo "$out" | gawk -v q="$q" -v variant="{{variant}}" -v mf="{{memfit}}" '
                 function tob(v,u){ if(u=="GiB")return v*1073741824; if(u=="MiB")return v*1048576; if(u=="KiB")return v*1024; return v }
                 /rows=/ && /time=/ { rep++; split($2,a,"="); t=a[2]/1000.0; split($4,p,"="); peak=tob(p[2],$5); split($6,m,"="); mhb=m[2] }
+                /\[metadata\] time=/ { split($2,mt,"="); meta=mt[2]/1000.0 }
                 /^read_bytes:/ { rb=tob($2,$3) }
-                /^prefetch_used_by_faults:/ { printf "ucache,%s,%s,cold,%s,%d,%.3f,%.0f,%.0f,%.0f,%s\n", variant, mf, q, rep, t, rb, tob($2,$3), peak, mhb }
+                /^prefetch_used_by_faults:/ { printf "ucache,%s,%s,cold,%s,%d,%.3f,%.3f,%.0f,%.0f,%.0f,%s\n", variant, mf, q, rep, t, meta, rb, tob($2,$3), peak, mhb }
             ' >> "$RF"
         fi
         just check_downgraded_link || true
@@ -72,19 +75,21 @@ ucache-warm variant memfit mem cache:
     #!/usr/bin/env bash
     set -uo pipefail
     RF="{{result_file}}"; mkdir -p "$(dirname "$RF")"
-    [ -f "$RF" ] || echo "system,variant,memfit,style,query,repetition,time,read_bytes,prefetch_used,peak_used,min_huge_blocks" > "$RF"
+    [ -f "$RF" ] || echo "system,variant,memfit,style,query,repetition,time,metadata_time,read_bytes,prefetch_used,peak_used,min_huge_blocks" > "$RF"
     for q in {{queries}}; do
         echo "==> [ucache/{{variant}}] warm memfit={{memfit}} q=$q (cache={{cache}})"
+        # </dev/null: see the note in ucache-cold.
         out=$(timeout {{timeout_s}} bash -c \
-            "cd {{proot}}/osv && just run-duckdb $q 3 {{mem}} {{vcpus}} {{cache}} {{ddb_mem}} 2048 2048" 2>&1)
+            "cd {{proot}}/osv && just run-duckdb $q 3 {{mem}} {{vcpus}} {{cache}} {{ddb_mem}} 2048 2048" 2>&1 </dev/null)
         if [ $? -ne 0 ]; then
-            echo "ucache,{{variant}},{{memfit}},warm,$q,1,OOM,na,na,na,na" >> "$RF"
+            echo "ucache,{{variant}},{{memfit}},warm,$q,1,OOM,na,na,na,na,na" >> "$RF"
         else
             echo "$out" | gawk -v q="$q" -v variant="{{variant}}" -v mf="{{memfit}}" '
                 function tob(v,u){ if(u=="GiB")return v*1073741824; if(u=="MiB")return v*1048576; if(u=="KiB")return v*1024; return v }
                 /rows=/ && /time=/ { rep++; split($2,a,"="); t=a[2]/1000.0; split($4,p,"="); peak=tob(p[2],$5); split($6,m,"="); mhb=m[2] }
+                /\[metadata\] time=/ { split($2,mt,"="); meta=mt[2]/1000.0 }
                 /^read_bytes:/ { rb=tob($2,$3) }
-                /^prefetch_used_by_faults:/ { printf "ucache,%s,%s,warm,%s,%d,%.3f,%.0f,%.0f,%.0f,%s\n", variant, mf, q, rep, t, rb, tob($2,$3), peak, mhb }
+                /^prefetch_used_by_faults:/ { printf "ucache,%s,%s,warm,%s,%d,%.3f,%.3f,%.0f,%.0f,%.0f,%s\n", variant, mf, q, rep, t, meta, rb, tob($2,$3), peak, mhb }
             ' >> "$RF"
         fi
         just check_downgraded_link || true
@@ -95,18 +100,21 @@ duckdb-cold memfit linux_mem:
     #!/usr/bin/env bash
     set -uo pipefail
     RF="{{result_file}}"; mkdir -p "$(dirname "$RF")"
-    [ -f "$RF" ] || echo "system,variant,memfit,style,query,repetition,time,read_bytes,prefetch_used,peak_used,min_huge_blocks" > "$RF"
+    [ -f "$RF" ] || echo "system,variant,memfit,style,query,repetition,time,metadata_time,read_bytes,prefetch_used,peak_used,min_huge_blocks" > "$RF"
     echo "==> [duckdb] cold memfit={{memfit}} (linux_mem={{linux_mem}})"
-    just linux_vm {{cores}} {{linux_mem}} > /dev/null 2>&1 &
+    # </dev/null on every VM/ssh call: qemu -nographic and ssh both grab the
+    # controlling tty, which stops them with SIGTTIN once they are off the
+    # foreground process group (see the note in ucache-cold).
+    just linux_vm {{cores}} {{linux_mem}} > /dev/null 2>&1 < /dev/null &
     sleep 30
-    just ssh "mkdir -p /nvme; mount /dev/nvme0n1 /nvme" || true
+    just ssh "mkdir -p /nvme; mount /dev/nvme0n1 /nvme" < /dev/null || true
     for q in {{queries}}; do
-        just ssh "echo 1 > /proc/sys/vm/drop_caches; rm -f /nvme/db.tmp; duckdb -no-stdin -c 'set enable_progress_bar = false' -c '.timer on' -c '.read /root/osv/benchmarks/duckdb/tpch/q${q}.sql' /nvme/db.tmp" \
+        just ssh "echo 1 > /proc/sys/vm/drop_caches; rm -f /nvme/db.tmp; duckdb -no-stdin -c 'set enable_progress_bar = false' -c '.timer on' -c '.read /root/osv/benchmarks/duckdb/tpch/q${q}.sql' /nvme/db.tmp" < /dev/null \
             | grep "Run Time" \
-            | gawk -v q="$q" -v mf="{{memfit}}" '{printf "duckdb,na,%s,cold,%s,%s,%.3f,na,na,na,na\n", mf, q, NR, $5}' >> "$RF"
+            | gawk -v q="$q" -v mf="{{memfit}}" '{printf "duckdb,na,%s,cold,%s,%s,%.3f,na,na,na,na,na\n", mf, q, NR, $5}' >> "$RF"
         sleep 5
     done
-    just ssh "poweroff" > /dev/null 2>&1 || true
+    just ssh "poweroff" > /dev/null 2>&1 < /dev/null || true
     sleep 20
     just check_downgraded_link || true
 
@@ -115,17 +123,20 @@ duckdb-warm memfit linux_mem:
     #!/usr/bin/env bash
     set -uo pipefail
     RF="{{result_file}}"; mkdir -p "$(dirname "$RF")"
-    [ -f "$RF" ] || echo "system,variant,memfit,style,query,repetition,time,read_bytes,prefetch_used,peak_used,min_huge_blocks" > "$RF"
+    [ -f "$RF" ] || echo "system,variant,memfit,style,query,repetition,time,metadata_time,read_bytes,prefetch_used,peak_used,min_huge_blocks" > "$RF"
     echo "==> [duckdb] warm memfit={{memfit}} (linux_mem={{linux_mem}})"
-    just linux_vm {{cores}} {{linux_mem}} > /dev/null 2>&1 &
+    # </dev/null on every VM/ssh call: qemu -nographic and ssh both grab the
+    # controlling tty, which stops them with SIGTTIN once they are off the
+    # foreground process group (see the note in ucache-cold).
+    just linux_vm {{cores}} {{linux_mem}} > /dev/null 2>&1 < /dev/null &
     sleep 30
-    just ssh "mkdir -p /nvme; mount /dev/nvme0n1 /nvme" || true
+    just ssh "mkdir -p /nvme; mount /dev/nvme0n1 /nvme" < /dev/null || true
     for q in {{queries}}; do
-        just ssh "echo 1 > /proc/sys/vm/drop_caches; rm -f /nvme/db.tmp; duckdb -no-stdin -c 'set enable_progress_bar = false' -c '.timer on' -c '.read /root/osv/benchmarks/duckdb/tpch/q${q}_repeat.sql' /nvme/db.tmp" \
+        just ssh "echo 1 > /proc/sys/vm/drop_caches; rm -f /nvme/db.tmp; duckdb -no-stdin -c 'set enable_progress_bar = false' -c '.timer on' -c '.read /root/osv/benchmarks/duckdb/tpch/q${q}_repeat.sql' /nvme/db.tmp" < /dev/null \
             | grep "Run Time" \
-            | gawk -v q="$q" -v mf="{{memfit}}" '{printf "duckdb,na,%s,warm,%s,%s,%.3f,na,na,na,na\n", mf, q, NR, $5}' >> "$RF"
+            | gawk -v q="$q" -v mf="{{memfit}}" '{printf "duckdb,na,%s,warm,%s,%s,%.3f,na,na,na,na,na\n", mf, q, NR, $5}' >> "$RF"
         sleep 5
     done
-    just ssh "poweroff" > /dev/null 2>&1 || true
+    just ssh "poweroff" > /dev/null 2>&1 < /dev/null || true
     sleep 20
     just check_downgraded_link || true

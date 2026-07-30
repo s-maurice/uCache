@@ -23,7 +23,7 @@ CONFIG_ORDER = ["DuckDB", "uCache (base)", "uCache (with)"]
 def load_data() -> pd.DataFrame:
     df = pd.read_csv(CSV)
     # OOM / non-numeric timings -> NaN (missing bar); bytes likewise.
-    for col in ["time", "read_bytes", "prefetch_used", "peak_used", "min_huge_blocks"]:
+    for col in ["time", "metadata_time", "read_bytes", "prefetch_used", "peak_used", "min_huge_blocks"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     df["config"] = [config_label(s, v) for s, v in zip(df["system"], df["variant"])]
