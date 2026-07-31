@@ -106,7 +106,11 @@ duckdb-cold memfit linux_mem:
     # controlling tty, which stops them with SIGTTIN once they are off the
     # foreground process group (see the note in ucache-cold).
     just linux_vm {{cores}} {{linux_mem}} > /dev/null 2>&1 < /dev/null &
-    sleep 30
+    # Poll for sshd: a cold boot runs fsck first and takes well over 40s.
+    for _ in $(seq 60); do
+        just ssh true < /dev/null > /dev/null 2>&1 && break
+        sleep 5
+    done
     just ssh "mkdir -p /nvme; mount /dev/nvme0n1 /nvme" < /dev/null || true
     for q in {{queries}}; do
         just ssh "echo 1 > /proc/sys/vm/drop_caches; rm -f /nvme/db.tmp; duckdb -no-stdin -c 'set enable_progress_bar = false' -c '.timer on' -c '.read /root/osv/benchmarks/duckdb/tpch/q${q}.sql' /nvme/db.tmp" < /dev/null \
@@ -129,7 +133,11 @@ duckdb-warm memfit linux_mem:
     # controlling tty, which stops them with SIGTTIN once they are off the
     # foreground process group (see the note in ucache-cold).
     just linux_vm {{cores}} {{linux_mem}} > /dev/null 2>&1 < /dev/null &
-    sleep 30
+    # Poll for sshd: a cold boot runs fsck first and takes well over 40s.
+    for _ in $(seq 60); do
+        just ssh true < /dev/null > /dev/null 2>&1 && break
+        sleep 5
+    done
     just ssh "mkdir -p /nvme; mount /dev/nvme0n1 /nvme" < /dev/null || true
     for q in {{queries}}; do
         just ssh "echo 1 > /proc/sys/vm/drop_caches; rm -f /nvme/db.tmp; duckdb -no-stdin -c 'set enable_progress_bar = false' -c '.timer on' -c '.read /root/osv/benchmarks/duckdb/tpch/q${q}_repeat.sql' /nvme/db.tmp" < /dev/null \
