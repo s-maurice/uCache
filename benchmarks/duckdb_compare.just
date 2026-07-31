@@ -12,15 +12,17 @@ queries := "01 02 03 04 05 06 07 08 09 10 11 12 13 14 16 17 18 19 20 21 22"
 cores := "16"
 vcpus := "16"
 timeout_s := "300"
-ddb_mem := "8G"
+ddb_mem := "64G"
 
-# memory-fit points: <OSv VM mem> / <uCache cache> / <Linux guest RAM>
-fits_mem := "96G"
+# Only the uCache pool varies; VM mem is cache+256G to hold regular memory
+# constant. Linux page cache size is not controllable, so Linux gets all the
+# memory at both points as a single best-case reference.
+fits_mem := "320G"
 fits_cache := "64G"
-fits_linux_mem := "128G"
-nofit_mem := "96G"
+fits_linux_mem := "512G"
+nofit_mem := "258G"
 nofit_cache := "2G"
-nofit_linux_mem := "25G"
+nofit_linux_mem := "512G"
 
 # Cold: each query once, at both memory-fit points.
 run-cold variant="with":
