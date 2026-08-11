@@ -7,17 +7,11 @@ from common import *
 
 CSV = os.path.join(result_dir, "duckdb_compare.csv")
 
-# system+variant -> display config
+
 def config_label(system, variant):
-    if system == "duckdb":
-        return "DuckDB"
-    if system == "ucache" and variant == "with":
-        return "uCache (with)"
-    if system == "ucache" and variant == "without":
-        return "uCache (base)"
     return f"{system}/{variant}"
 
-CONFIG_ORDER = ["DuckDB", "uCache (base)", "uCache (with)"]
+CONFIG_ORDER = ["duckdb/na", "ucache/without", "ucache/with"]
 
 
 def load_data() -> pd.DataFrame:
@@ -27,6 +21,13 @@ def load_data() -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     df["config"] = [config_label(s, v) for s, v in zip(df["system"], df["variant"])]
+    # The CSV is append-only: keep the newest row per key so a re-run is not
+    # averaged together with the rows it supersedes.
+    key = ["system", "variant", "memfit", "style", "query", "repetition"]
+    dup = df.duplicated(key, keep="last")
+    if dup.any():
+        print(f"note: dropped {dup.sum()} superseded row(s) from re-run legs")
+        df = df[~dup]
     # Warm: drop the cold first repetition; cold: keep its single rep.
     df = df[(df["style"] == "cold") | (df["repetition"] > 1)]
     # zero-pad query for stable ordering on the x-axis
@@ -67,9 +68,19 @@ def facet_bar(data, y, ylabel, outfile, title):
 def main():
     data = load_data()
 
+    # Warn when a config has no rows, since it plots the same as no difference.
+    present = set(data["config"])
+    missing = [c for c in CONFIG_ORDER if c not in present]
+    if missing:
+        print("WARNING: no rows for " + ", ".join(missing) + ", those series are absent, not equal")
+    for (mf, st), grp in data.groupby(["memfit", "style"]):
+        absent = [c for c in CONFIG_ORDER if c in present and c not in set(grp["config"])]
+        if absent:
+            print(f"WARNING: {mf}/{st} is missing " + ", ".join(absent))
+
     # 1) runtime, all configs
     facet_bar(data, "time", "Time (s)", "duckdb_compare.pdf",
-              "DuckDB vs uCache (with/without), " + lower_better_str)
+              "duckdb/na vs ucache/without vs ucache/with, " + lower_better_str)
 
     # 2) IO volume, uCache configs only (DuckDB has no read_bytes)
     io = data[(data["system"] == "ucache") & data["read_bytes"].notna()].copy()
@@ -78,17 +89,18 @@ def main():
         facet_bar(io, "read_gib", "read_bytes (GiB)", "duckdb_compare_io.pdf",
                   "uCache IO per query, " + lower_better_str)
 
-    # quick console summary: mean speedup uCache(with) vs DuckDB, per memfit/style
+    # quick console summary, per memfit/style, over the queries each pair shares
     piv = (data.dropna(subset=["time"])
                .groupby(["memfit", "style", "config", "query"])["time"].mean()
                .reset_index())
     for (mf, st), grp in piv.groupby(["memfit", "style"]):
-        w = grp[grp.config == "uCache (with)"].set_index("query")["time"]
-        d = grp[grp.config == "DuckDB"].set_index("query")["time"]
-        common_q = w.index.intersection(d.index)
-        if len(common_q):
-            ratio = (d.loc[common_q] / w.loc[common_q]).mean()
-            print(f"{mf}/{st}: mean DuckDB/uCache(with) speedup = {ratio:.2f}x")
+        series = {c: g.set_index("query")["time"] for c, g in grp.groupby("config")}
+        for num, den in [("ucache/without", "ucache/with"), ("duckdb/na", "ucache/with")]:
+            if num in series and den in series:
+                common_q = series[num].index.intersection(series[den].index)
+                if len(common_q):
+                    ratio = (series[num].loc[common_q] / series[den].loc[common_q]).mean()
+                    print(f"{mf}/{st}: mean {num} / {den} = {ratio:.2f}x  (n={len(common_q)})")
 
 
 if __name__ == "__main__":

@@ -58,16 +58,27 @@ ucache-cold variant memfit mem cache:
         # where touching the controlling tty stops it on SIGTTIN/SIGTTOU.
         out=$(timeout {{timeout_s}} bash -c \
             "cd {{proot}}/osv && just run-duckdb $q 1 {{mem}} {{vcpus}} {{cache}} {{ddb_mem}} 2048 2048" 2>&1 </dev/null)
-        if [ $? -ne 0 ]; then
-            echo "ucache,{{variant}},{{memfit}},cold,$q,1,OOM,na,na,na,na,na" >> "$RF"
+        rc=$?
+        # A query can FAIL while exiting 0: a DuckDB error prints no `rows=/time=`
+        # line but still reaches the BENCHMARK PEAK banner. Count rows and record a
+        # status row when none appear, so a broken run is visible in the CSV.
+        if [ $rc -ne 0 ]; then
+            [ $rc -eq 124 ] && st=TIMEOUT || st=FAIL
+            echo "ucache,{{variant}},{{memfit}},cold,$q,1,$st,na,na,na,na,na" >> "$RF"
+            printf '%s\n' "$out" > "$(dirname "$RF")/failed_ucache_{{variant}}_{{memfit}}_cold_q$q.log"
         else
-            echo "$out" | gawk -v q="$q" -v variant="{{variant}}" -v mf="{{memfit}}" '
+            n=$(echo "$out" | gawk -v q="$q" -v variant="{{variant}}" -v mf="{{memfit}}" '
                 function tob(v,u){ if(u=="GiB")return v*1073741824; if(u=="MiB")return v*1048576; if(u=="KiB")return v*1024; return v }
                 /rows=/ && /time=/ { rep++; split($2,a,"="); t=a[2]/1000.0; split($4,p,"="); peak=tob(p[2],$5); split($6,m,"="); mhb=m[2] }
                 /\[metadata\] time=/ { split($2,mt,"="); meta=mt[2]/1000.0 }
                 /^read_bytes:/ { rb=tob($2,$3) }
                 /^prefetch_used_by_faults:/ { printf "ucache,%s,%s,cold,%s,%d,%.3f,%.3f,%.0f,%.0f,%.0f,%s\n", variant, mf, q, rep, t, meta, rb, tob($2,$3), peak, mhb }
-            ' >> "$RF"
+            ' | tee -a "$RF" | wc -l)
+            if [ "$n" -eq 0 ]; then
+                echo "ucache,{{variant}},{{memfit}},cold,$q,1,ERROR,na,na,na,na,na" >> "$RF"
+                printf '%s\n' "$out" > "$(dirname "$RF")/failed_ucache_{{variant}}_{{memfit}}_cold_q$q.log"
+                echo "    !! q$q produced no rows despite exit 0, see failed_*_q$q.log"
+            fi
         fi
         just check_downgraded_link || true
     done
@@ -83,16 +94,27 @@ ucache-warm variant memfit mem cache:
         # </dev/null: see the note in ucache-cold.
         out=$(timeout {{timeout_s}} bash -c \
             "cd {{proot}}/osv && just run-duckdb $q 3 {{mem}} {{vcpus}} {{cache}} {{ddb_mem}} 2048 2048" 2>&1 </dev/null)
-        if [ $? -ne 0 ]; then
-            echo "ucache,{{variant}},{{memfit}},warm,$q,1,OOM,na,na,na,na,na" >> "$RF"
+        rc=$?
+        # See the note in ucache-cold: exit 0 with no parsed rows is a failure too.
+        if [ $rc -ne 0 ]; then
+            [ $rc -eq 124 ] && st=TIMEOUT || st=FAIL
+            echo "ucache,{{variant}},{{memfit}},warm,$q,1,$st,na,na,na,na,na" >> "$RF"
+            printf '%s\n' "$out" > "$(dirname "$RF")/failed_ucache_{{variant}}_{{memfit}}_warm_q$q.log"
         else
-            echo "$out" | gawk -v q="$q" -v variant="{{variant}}" -v mf="{{memfit}}" '
+            n=$(echo "$out" | gawk -v q="$q" -v variant="{{variant}}" -v mf="{{memfit}}" '
                 function tob(v,u){ if(u=="GiB")return v*1073741824; if(u=="MiB")return v*1048576; if(u=="KiB")return v*1024; return v }
                 /rows=/ && /time=/ { rep++; split($2,a,"="); t=a[2]/1000.0; split($4,p,"="); peak=tob(p[2],$5); split($6,m,"="); mhb=m[2] }
                 /\[metadata\] time=/ { split($2,mt,"="); meta=mt[2]/1000.0 }
                 /^read_bytes:/ { rb=tob($2,$3) }
                 /^prefetch_used_by_faults:/ { printf "ucache,%s,%s,warm,%s,%d,%.3f,%.3f,%.0f,%.0f,%.0f,%s\n", variant, mf, q, rep, t, meta, rb, tob($2,$3), peak, mhb }
-            ' >> "$RF"
+            ' | tee -a "$RF" | wc -l)
+            if [ "$n" -eq 0 ]; then
+                echo "ucache,{{variant}},{{memfit}},warm,$q,1,ERROR,na,na,na,na,na" >> "$RF"
+                printf '%s\n' "$out" > "$(dirname "$RF")/failed_ucache_{{variant}}_{{memfit}}_warm_q$q.log"
+                echo "    !! q$q produced no rows despite exit 0, see failed_*_q$q.log"
+            elif [ "$n" -lt 3 ]; then
+                echo "    !! q$q produced only $n of 3 repetitions"
+            fi
         fi
         just check_downgraded_link || true
     done
@@ -115,9 +137,17 @@ duckdb-cold memfit linux_mem:
     done
     just ssh "mkdir -p /nvme; mount /dev/nvme0n1 /nvme" < /dev/null || true
     for q in {{queries}}; do
-        just ssh "echo 1 > /proc/sys/vm/drop_caches; rm -f /nvme/db.tmp; duckdb -no-stdin -c 'set enable_progress_bar = false' -c '.timer on' -c '.read /root/osv/benchmarks/duckdb/tpch/q${q}.sql' /nvme/db.tmp" < /dev/null \
-            | grep "Run Time" \
-            | gawk -v q="$q" -v mf="{{memfit}}" '{printf "duckdb,na,%s,cold,%s,%s,%.3f,na,na,na,na,na\n", mf, q, NR, $5}' >> "$RF"
+        # Capture first, then parse: piping into grep threw away the output of a
+        # query that died, leaving neither a row nor a log.
+        out=$(just ssh "echo 1 > /proc/sys/vm/drop_caches; rm -f /nvme/db.tmp; duckdb -no-stdin -c 'set enable_progress_bar = false' -c '.timer on' -c '.read /root/osv/benchmarks/duckdb/tpch/q${q}.sql' /nvme/db.tmp" < /dev/null 2>&1)
+        n=$(printf '%s\n' "$out" | grep "Run Time" \
+            | gawk -v q="$q" -v mf="{{memfit}}" '{printf "duckdb,na,%s,cold,%s,%s,%.3f,na,na,na,na,na\n", mf, q, NR, $5}' \
+            | tee -a "$RF" | wc -l)
+        if [ "$n" -eq 0 ]; then
+            echo "duckdb,na,{{memfit}},cold,$q,1,ERROR,na,na,na,na,na" >> "$RF"
+            printf '%s\n' "$out" > "$(dirname "$RF")/failed_duckdb_{{memfit}}_cold_q$q.log"
+            echo "    !! q$q produced no timing, see failed_duckdb_{{memfit}}_cold_q$q.log"
+        fi
         sleep 5
     done
     just ssh "poweroff" > /dev/null 2>&1 < /dev/null || true
@@ -142,9 +172,18 @@ duckdb-warm memfit linux_mem:
     done
     just ssh "mkdir -p /nvme; mount /dev/nvme0n1 /nvme" < /dev/null || true
     for q in {{queries}}; do
-        just ssh "echo 1 > /proc/sys/vm/drop_caches; rm -f /nvme/db.tmp; duckdb -no-stdin -c 'set enable_progress_bar = false' -c '.timer on' -c '.read /root/osv/benchmarks/duckdb/tpch/q${q}_repeat.sql' /nvme/db.tmp" < /dev/null \
-            | grep "Run Time" \
-            | gawk -v q="$q" -v mf="{{memfit}}" '{printf "duckdb,na,%s,warm,%s,%s,%.3f,na,na,na,na,na\n", mf, q, NR, $5}' >> "$RF"
+        # See the note in duckdb-cold: capture, then parse, then record failures.
+        out=$(just ssh "echo 1 > /proc/sys/vm/drop_caches; rm -f /nvme/db.tmp; duckdb -no-stdin -c 'set enable_progress_bar = false' -c '.timer on' -c '.read /root/osv/benchmarks/duckdb/tpch/q${q}_repeat.sql' /nvme/db.tmp" < /dev/null 2>&1)
+        n=$(printf '%s\n' "$out" | grep "Run Time" \
+            | gawk -v q="$q" -v mf="{{memfit}}" '{printf "duckdb,na,%s,warm,%s,%s,%.3f,na,na,na,na,na\n", mf, q, NR, $5}' \
+            | tee -a "$RF" | wc -l)
+        if [ "$n" -eq 0 ]; then
+            echo "duckdb,na,{{memfit}},warm,$q,1,ERROR,na,na,na,na,na" >> "$RF"
+            printf '%s\n' "$out" > "$(dirname "$RF")/failed_duckdb_{{memfit}}_warm_q$q.log"
+            echo "    !! q$q produced no timing, see failed_duckdb_{{memfit}}_warm_q$q.log"
+        elif [ "$n" -lt 3 ]; then
+            echo "    !! q$q produced only $n of 3 repetitions"
+        fi
         sleep 5
     done
     just ssh "poweroff" > /dev/null 2>&1 < /dev/null || true
