@@ -11,7 +11,7 @@ result_file := proot+"/benchmarks/results/duckdb_compare.csv"
 queries := "01 02 03 04 05 06 07 08 09 10 11 12 13 14 16 17 18 19 20 21 22"
 cores := "16"
 vcpus := "16"
-timeout_s := "300"
+timeout_s := "900"
 ddb_mem := "64G"
 
 # Only the uCache pool varies; VM mem is cache+256G to hold regular memory
