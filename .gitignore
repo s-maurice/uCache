@@ -2,3 +2,9 @@ VMs
 .bash_history
 .duckdb_history
 .nix-channels
+.cache
+.helix
+__pycache__
+compile_commands.json
+traces.folded
+traces.bin

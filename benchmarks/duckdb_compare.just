@@ -8,6 +8,7 @@ import? "../justfile"
 
 self := proot+"/benchmarks/duckdb_compare.just"
 result_file := proot+"/benchmarks/results/duckdb_compare.csv"
+sweep_file := proot+"/benchmarks/results/evict_sweep.csv"
 queries := "01 02 03 04 05 06 07 08 09 10 11 12 13 14 16 17 18 19 20 21 22"
 cores := "16"
 vcpus := "16"
@@ -69,6 +70,10 @@ ucache-cold variant memfit mem cache:
         else
             n=$(echo "$out" | gawk -v q="$q" -v variant="{{variant}}" -v mf="{{memfit}}" '
                 function tob(v,u){ if(u=="GiB")return v*1073741824; if(u=="MiB")return v*1048576; if(u=="KiB")return v*1024; return v }
+                # The serial console emits CRLF, so the unit of a line-final stat
+                # arrives as "GiB\r", tob falls through to the raw number, and
+                # read_bytes/prefetch_used land in the CSV 2^30 too small.
+                { sub(/\r$/, "") }
                 /rows=/ && /time=/ { rep++; split($2,a,"="); t=a[2]/1000.0; split($4,p,"="); peak=tob(p[2],$5); split($6,m,"="); mhb=m[2] }
                 /\[metadata\] time=/ { split($2,mt,"="); meta=mt[2]/1000.0 }
                 /^read_bytes:/ { rb=tob($2,$3) }
@@ -103,6 +108,10 @@ ucache-warm variant memfit mem cache:
         else
             n=$(echo "$out" | gawk -v q="$q" -v variant="{{variant}}" -v mf="{{memfit}}" '
                 function tob(v,u){ if(u=="GiB")return v*1073741824; if(u=="MiB")return v*1048576; if(u=="KiB")return v*1024; return v }
+                # The serial console emits CRLF, so the unit of a line-final stat
+                # arrives as "GiB\r", tob falls through to the raw number, and
+                # read_bytes/prefetch_used land in the CSV 2^30 too small.
+                { sub(/\r$/, "") }
                 /rows=/ && /time=/ { rep++; split($2,a,"="); t=a[2]/1000.0; split($4,p,"="); peak=tob(p[2],$5); split($6,m,"="); mhb=m[2] }
                 /\[metadata\] time=/ { split($2,mt,"="); meta=mt[2]/1000.0 }
                 /^read_bytes:/ { rb=tob($2,$3) }
@@ -189,3 +198,44 @@ duckdb-warm memfit linux_mem:
     just ssh "poweroff" > /dev/null 2>&1 < /dev/null || true
     sleep 20
     just check_downgraded_link || true
+
+# Sweep UCACHE_EVICT_BATCH for one query at one memory-fit point, into its own
+# CSV; prefetch_batch stays at 2048 so only one knob moves.
+evict-sweep variant="with" query="08" memfit="nofit" reps="3" batches="64 256 1024 2048 8192":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    RF="{{sweep_file}}"; mkdir -p "$(dirname "$RF")"
+    [ -f "$RF" ] || echo "system,variant,memfit,style,query,repetition,evict_batch,time,metadata_time,read_bytes,prefetch_used,peak_used,min_huge_blocks" > "$RF"
+    if [ "{{memfit}}" = "fits" ]; then
+        mem="{{fits_mem}}"; cache="{{fits_cache}}"
+    else
+        mem="{{nofit_mem}}"; cache="{{nofit_cache}}"
+    fi
+    [ "{{reps}}" -gt 1 ] && style=warm || style=cold
+    for eb in {{batches}}; do
+        echo "==> [ucache/{{variant}}] {{memfit}}/$style q{{query}} evict_batch=$eb (cache=$cache)"
+        # </dev/null: see the note in ucache-cold.
+        out=$(timeout {{timeout_s}} bash -c \
+            "cd {{proot}}/osv && just run-duckdb {{query}} {{reps}} $mem {{vcpus}} $cache {{ddb_mem}} $eb 2048" 2>&1 </dev/null)
+        rc=$?
+        if [ $rc -ne 0 ]; then
+            [ $rc -eq 124 ] && st=TIMEOUT || st=FAIL
+            echo "ucache,{{variant}},{{memfit}},$style,{{query}},1,$eb,$st,na,na,na,na,na" >> "$RF"
+            printf '%s\n' "$out" > "$(dirname "$RF")/failed_sweep_{{variant}}_{{memfit}}_q{{query}}_eb$eb.log"
+            continue
+        fi
+        n=$(echo "$out" | gawk -v q="{{query}}" -v variant="{{variant}}" -v mf="{{memfit}}" -v st="$style" -v eb="$eb" '
+            function tob(v,u){ if(u=="GiB")return v*1073741824; if(u=="MiB")return v*1048576; if(u=="KiB")return v*1024; return v }
+            { sub(/\r$/, "") }
+            /rows=/ && /time=/ { rep++; split($2,a,"="); t=a[2]/1000.0; split($4,p,"="); peak=tob(p[2],$5); split($6,m,"="); mhb=m[2] }
+            /\[metadata\] time=/ { split($2,mt,"="); meta=mt[2]/1000.0 }
+            /^read_bytes:/ { rb=tob($2,$3) }
+            /^prefetch_used_by_faults:/ { printf "ucache,%s,%s,%s,%s,%d,%s,%.3f,%.3f,%.0f,%.0f,%.0f,%s\n", variant, mf, st, q, rep, eb, t, meta, rb, tob($2,$3), peak, mhb }
+        ' | tee -a "$RF" | wc -l)
+        if [ "$n" -eq 0 ]; then
+            echo "ucache,{{variant}},{{memfit}},$style,{{query}},1,$eb,ERROR,na,na,na,na,na" >> "$RF"
+            printf '%s\n' "$out" > "$(dirname "$RF")/failed_sweep_{{variant}}_{{memfit}}_q{{query}}_eb$eb.log"
+            echo "    !! evict_batch=$eb produced no rows, see failed_sweep_*_eb$eb.log"
+        fi
+        just check_downgraded_link || true
+    done
