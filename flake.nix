@@ -5,7 +5,8 @@
     {
         nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
         nixpkgs-stable.url = "github:NixOS/nixpkgs/nixos-24.11";
-        nixpkgs-2311.url = "github:NixOS/nixpkgs/nixos-23.11";
+        # Pinned: later nixos-23.11 drops linux_6_5, we may need it for exmap.
+        nixpkgs-2311.url = "github:NixOS/nixpkgs/f091af045dff8347d66d186a62d42aceff159456";
         nixpkgs-2211.url = "github:nixos/nixpkgs?ref=22.11";
         nixos-generators = {
             url = "github:nix-community/nixos-generators";
@@ -13,6 +14,12 @@
         };
         flake-utils.url = "github:numtide/flake-utils";
         nur-niwa.url = "github:Meandres/nur-niwa";
+        # ?submodules=1 is required: that flake throws at eval without duckdb/.
+        # nixpkgs is left unfollowed - it needs its own 25.11 to build DuckDB 1.5.4.
+        cache-httpfs = {
+            url = "git+https://github.com/Meandres/duck-read-cache-fs?submodules=1";
+            inputs.flake-utils.follows = "flake-utils";
+        };
     };
     
     outputs = 
@@ -25,6 +32,7 @@
         , nixos-generators
         , flake-utils
         , nur-niwa
+        , cache-httpfs
     } @ inputs:
    (flake-utils.lib.eachSystem ["x86_64-linux"](system:
     let
@@ -44,7 +52,8 @@
             packages =
             {
                 vmcache = (import ./nix/vmcache.nix { inherit pkgs;});
-                mmapbench = (import ./nix/mmapbench.nix { inherit pkgs;}); 
+                mmapbench = (import ./nix/mmapbench.nix { inherit pkgs;});
+                duckdb-cache-httpfs = cache-httpfs.packages.${system}.duckdb-cache-httpfs;
 
                 specificKernelPackages = kernelPackages;
 
@@ -102,7 +111,7 @@
                         osv-ssl
                         gcc13
                         libgcc
-                        niwa-pkgs.tpchgen-rs
+                        selfpkgs.duckdb-cache-httpfs
                         parallel
                         scc
                         numactl
@@ -125,7 +134,7 @@
                         libvirt
                         ncurses
                         pax-utils # elf security library
-                        python311Packages.requests
+                        python3.pkgs.requests
                         p11-kit # PKCS#11 loader
                         unzip
                         osv-ssl
@@ -153,7 +162,12 @@
                     LIBZ_DIR="${pkgs.libz}";
                     LIBSELINUX_DIR="${pkgs.libselinux.out}";
 
+                    shellHook = ''
+                        export PATH="${python3}/bin:$PATH"
+                    '';
+
                     CAPSTAN_QEMU_PATH = "${pkgs.qemu}/bin/qemu-system-x86_64";
+                    DUCKDB_CACHE_HTTPFS = "${selfpkgs.duckdb-cache-httpfs}/bin/duckdb";
                 });
             };
         }
@@ -178,7 +192,8 @@
                         inherit (pkgs) lib;
                         inherit selfpkgs;
                         inherit kernelPackages;
-                        duckdb = pkgs.duckdb;
+                        # duckdb in the inner nixos is the cache-httpfs one
+                        duckdb = selfpkgs.duckdb-cache-httpfs;
                     })
                     ./nix/nixos-generators-qcow.nix
                 ];

@@ -14,6 +14,9 @@ sync-pull remote rpath:
     rsync -avz {{remote}}:{{rpath}}/compile_commands.json {{invocation_directory()}}/
     sed -i 's|{{rpath}}|{{invocation_directory()}}|g' {{invocation_directory()}}/compile_commands.json
 
+plot-cachefs:
+    cd {{proot}}/benchmarks/plots && python3 cachefs_compare.py
+
 gen-compile-commands remote rpath image="integrated_vmcache_tabby":
     just sync-push {{remote}} {{rpath}}
     ssh {{remote}} "cd {{rpath}} && nix develop --command bash -c 'cd osv && bear --append --output ../compile_commands.json -- ./scripts/build -j fs=ramfs image={{image}}'"
