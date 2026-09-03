@@ -36,13 +36,13 @@ export DDB_MEM := env("DDB_MEM", "64G")
 # eviction round can clear a whole prefetch burst.
 export EVICT_BATCH := env("EVICT_BATCH", "8192")
 export PREFETCH_BATCH := env("PREFETCH_BATCH", "2048")
-# OSv VM mem = uCache pool + this, so the regular memory ucache_frames_init steals
-# the pool out of stays constant as CACHE_PCT moves.
-export OSV_HEADROOM := env("OSV_HEADROOM", "256G")
-export LINUX_MEM := env("LINUX_MEM", "320G")
-# CACHE_PCT's denominator. DATA_DIR is the host-side folder the parquet was copied
-# from (osv/justfile setup-nvme-ssd); DATA_BYTES short-circuits it. SCALE only labels
-# the CSV rows, so SF10 and SF100 runs never blend; it defaults to DATA_DIR's basename.
+# Both systems size their VM as cache + this, so the memory outside the cache is
+# the same on each and constant as CACHE_PCT moves.
+export VM_HEADROOM := env("VM_HEADROOM", "96G")
+# Overrides the Linux guest's size; empty = cache + VM_HEADROOM, same as OSv.
+export LINUX_MEM := env("LINUX_MEM", "")
+# CACHE_PCT's denominator. DATA_BYTES short-circuits DATA_DIR; SCALE labels the CSV
+# rows so SF10 and SF100 never blend, and defaults to DATA_DIR's basename.
 export DATA_DIR := env("DATA_DIR", "/scratch/ilya/tpch100")
 export DATA_BYTES := env("DATA_BYTES", "")
 export SCALE := env("SCALE", "")
@@ -80,6 +80,15 @@ _data_bytes:
 # back as unset, and the OSv app then falls back to half of RAM.
 _cache_bytes:
     @echo $(( $(just -f {{self}} _data_bytes) * {{CACHE_PCT}} / 100 ))
+
+# VM size for either system: the cache, rounded up to whole GiB, plus VM_HEADROOM.
+_vm_mem:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cache=$(just -f {{self}} _cache_bytes)
+    cache_g=$(( (cache + 1073741823) / 1073741824 ))
+    headroom="{{VM_HEADROOM}}"
+    echo "$(( cache_g + ${headroom%[Gg]} ))G"
 
 # The config prefix both systems stamp on every row they write.
 _cfg system cache_bytes:
@@ -177,10 +186,7 @@ ucache:
     [ -f "$RF" ] || echo "{{header}}" > "$RF"
     cache=$(just -f {{self}} _cache_bytes) || exit 1
     cfg=$(just -f {{self}} _cfg ucache "$cache")
-    # Ceiling GiB, for VM sizing only.
-    cache_g=$(( (cache + 1073741823) / 1073741824 ))
-    headroom="{{OSV_HEADROOM}}"
-    mem="$(( cache_g + ${headroom%[Gg]} ))G"
+    mem=$(just -f {{self}} _vm_mem) || exit 1
 
     echo "==> [ucache] {{REPEAT}}x each of {{QUERIES}} (cache=$((cache / 1024 / 1024))MiB = {{CACHE_PCT}}%, mem=$mem)"
     for q in {{QUERIES}}; do
@@ -244,12 +250,11 @@ cachefs:
     done
     [ -n "$todo" ] || exit 0
 
-    echo "==> [cache_httpfs] {{REPEAT}}x each of$todo (cache=$((cache / 1024 / 1024))MiB = {{CACHE_PCT}}%)"
-    # </dev/null on every VM/ssh call: qemu -nographic and ssh both grab the
-    # controlling tty, which stops them with SIGTTIN once off the foreground
-    # process group (see benchmarks/duckdb_compare.just).
+    linux_mem="{{LINUX_MEM}}"; [ -n "$linux_mem" ] || linux_mem=$(just -f {{self}} _vm_mem)
+    echo "==> [cache_httpfs] {{REPEAT}}x each of$todo (cache=$((cache / 1024 / 1024))MiB = {{CACHE_PCT}}%, mem=$linux_mem)"
+    # </dev/null on every VM/ssh call: see the note in ucache.
     # Keep qemu's stderr: it is the only place a VFIO/memlock failure is reported.
-    just linux_vm {{THREADS}} {{LINUX_MEM}} > "{{results_dir}}/linux_vm.log" 2>&1 < /dev/null &
+    just linux_vm {{THREADS}} "$linux_mem" > "{{results_dir}}/linux_vm.log" 2>&1 < /dev/null &
     # Poll for sshd rather than sleeping: a cold boot runs fsck long before sshd is up.
     booted=0
     for _ in $(seq 60); do
