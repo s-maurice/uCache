@@ -5,7 +5,7 @@ import? "../justfile"
 # ucache: fresh OSv boot per query.
 # cache_httpfs: one guest VM, fresh duckdb process per query.
 # Knobs are the NAME=value assignments below, set before the recipe name:
-#   just -f benchmarks/cachefs_compare.just QUERIES=06 LATENCY_US=0 compare
+#   just -f benchmarks/cachefs_compare.just QUERIES=06 LATENCY_US=1400 BANDWIDTH=0.7 compare
 # LATENCY_US/BANDWIDTH: delay = latency_us + bytes / (bandwidth_gbps * 1000),
 # charged per BLOCK_SIZE chunk on cache_httpfs, per page or prefetch batch on uCache.
 
@@ -24,9 +24,9 @@ export POLICY := env("POLICY", "lru")
 export SCOPE := env("SCOPE", "global")
 export FILE_POLICIES := env("FILE_POLICIES", "")
 export CHUNKING := env("CHUNKING", "")
-# 1400:0.7 = MinIO over 100 GbE (measured); 20000-40000 us ~= real S3.
-export LATENCY_US := env("LATENCY_US", "1400")
-export BANDWIDTH := env("BANDWIDTH", "0.7")
+# 0 = off. 1400:0.7 = MinIO over 100 GbE (measured); 20000-40000 us ~= real S3.
+export LATENCY_US := env("LATENCY_US", "0")
+export BANDWIDTH := env("BANDWIDTH", "0")
 
 # TPC-H minus 15: the tpch/q15.sql read on Linux points at a nonexistent
 # revenue.parquet.
@@ -103,15 +103,28 @@ _cfg system cache_bytes:
         echo "cache_httpfs,$scale,{{CACHE_PCT}},{{cache_bytes}},{{THREADS}},{{BLOCK_SIZE}},na,na,{{POLICY}},{{SCOPE}},$chunking,{{LATENCY_US}},{{BANDWIDTH}},block"
     fi
 
+# Start a CSV, or move one written by an older harness schema aside: the header is only
+# written when the file is absent, so appending to a stale one silently mixes schemas.
+_csv_header file header:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -f "{{file}}" ] && [ "$(head -1 "{{file}}")" != "{{header}}" ]; then
+        mv "{{file}}" "{{file}}.legacy-$(date +%Y%m%d%H%M%S)"
+        echo "    note: CSV schema changed; previous rows kept as {{file}}.legacy-*"
+    fi
+    [ -f "{{file}}" ] || echo "{{header}}" > "{{file}}"
+
 # Exit 0 if the CSV already holds a real timing for this (system, scale, cache_pct,
-# query). A TIMEOUT/FAIL/ERROR row parses as 0, so a failed point is retried.
+# query) at the current penalty. A TIMEOUT/FAIL/ERROR row parses as 0, so a failed
+# point is retried; rows measured at another LATENCY_US/BANDWIDTH are a different point.
 _done system query:
     #!/usr/bin/env bash
     set -euo pipefail
     [ -f "{{result_file}}" ] || exit 1
     scale="{{SCALE}}"; [ -n "$scale" ] || scale=$(basename "{{DATA_DIR}}")
     gawk -F, -v s="{{system}}" -v sc="$scale" -v p="{{CACHE_PCT}}" -v q="{{query}}" \
-        '$1==s && $2==sc && $3==p && $15==q && $17+0>0 { found=1 }
+        -v lat="{{LATENCY_US}}" -v bw="{{BANDWIDTH}}" \
+        '$1==s && $2==sc && $3==p && $12==lat && $13==bw && $15==q && $17+0>0 { found=1 }
          END { exit !found }' "{{result_file}}"
 
 # The workload script cache_httpfs pipes into duckdb for one query: settings, that
@@ -148,6 +161,8 @@ _script query cache_bytes:
         echo ".mode trash"
         echo ".timer on"
         for _ in $(seq {{REPEAT}}); do
+            # In-process, so the in_mem cache survives it and only the page cache goes.
+            echo ".system /root/benchmarks/results/drop_caches.sh"
             cat "{{proot}}/osv/benchmarks/duckdb/tpch/q{{query}}.sql"
         done
         # Timer off first, or the COPY emits a Run Time line the parser would read as
@@ -155,6 +170,10 @@ _script query cache_bytes:
         echo ".timer off"
         echo "COPY (SELECT * FROM cache_httpfs_cache_access_info_query()) TO '/root/benchmarks/results/cachefs_access_q{{query}}.csv' (FORMAT CSV, HEADER);"
     } > "{{results_dir}}/cachefs_workload_q{{query}}.sql"
+    # .system quotes only arguments without spaces, so this stays a bare path.
+    printf '#!/usr/bin/env bash\nsync\necho 3 > /proc/sys/vm/drop_caches\n' \
+        > "{{results_dir}}/drop_caches.sh"
+    chmod +x "{{results_dir}}/drop_caches.sh"
     if [ "{{CHUNKING}}" = "column_chunk" ]; then
         echo "!! CHUNKING=column_chunk also needs cache_httpfs_register_parquet_layout()" >&2
         echo "!! per file, which this harness does not emit. Files without a registered" >&2
@@ -183,7 +202,7 @@ ucache:
     # Ctrl-C aborts the sweep; it reaches this shell only while it sits in `wait` below.
     trap 'echo "    !! interrupted - now: pkill qemu-system"; exit 130' INT
     RF="{{result_file}}"; mkdir -p "{{results_dir}}"
-    [ -f "$RF" ] || echo "{{header}}" > "$RF"
+    just -f {{self}} _csv_header "$RF" "{{header}}"
     cache=$(just -f {{self}} _cache_bytes) || exit 1
     cfg=$(just -f {{self}} _cfg ucache "$cache")
     mem=$(just -f {{self}} _vm_mem) || exit 1
@@ -234,8 +253,8 @@ cachefs:
     # Ctrl-C aborts the sweep; it reaches this shell only while it sits in `wait` below.
     trap 'echo "    !! interrupted - now: pkill qemu-system"; exit 130' INT
     RF="{{result_file}}"; AF="{{access_file}}"; mkdir -p "{{results_dir}}"
-    [ -f "$RF" ] || echo "{{header}}" > "$RF"
-    [ -f "$AF" ] || echo "{{acc_header}}" > "$AF"
+    just -f {{self}} _csv_header "$RF" "{{header}}"
+    just -f {{self}} _csv_header "$AF" "{{acc_header}}"
     cache=$(just -f {{self}} _cache_bytes) || exit 1
     cfg=$(just -f {{self}} _cfg cachefs "$cache")
 
@@ -274,9 +293,6 @@ cachefs:
         echo "==> [cache_httpfs] q$q"
         rm -f "{{results_dir}}/cachefs_access_q$q.csv"
         just -f {{self}} _script "$q" "$cache" || continue
-        # A fresh process per query, so the in_mem cache starts empty; drop_caches so
-        # the guest page cache does too.
-        just ssh "echo 3 > /proc/sys/vm/drop_caches" < /dev/null > /dev/null 2>&1 || true
         # The repo root is 9p-mounted at /root in the guest, so the script generated on
         # the host is readable there directly. Capture first, then parse, so the output
         # of a run that died is kept. -cmd, not -c: -c exits without reading stdin.
