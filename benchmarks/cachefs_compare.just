@@ -51,7 +51,7 @@ export TIMEOUT_S := env("TIMEOUT_S", "1800")
 # Skip a (system, scale, cache_pct, query) that already has a good row in the CSV.
 export RESUME := env("RESUME", "true")
 # Cache size as a % of the dataset, for `sweep`.
-export CACHE_PCTS := env("CACHE_PCTS", "1 5 10 40 100")
+export CACHE_PCTS := env("CACHE_PCTS", "1 10 20 40 100")
 
 # Config columns every row carries. sim_unit is what one simulated request covered:
 # a BLOCK_SIZE chunk for cache_httpfs, a page or a prefetch batch for uCache.

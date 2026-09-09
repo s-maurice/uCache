@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Plot results/cachefs_compare.csv: Linux+cache_httpfs vs OSv+uCache on the same
-# TPC-H parquet, both charged the same simulated object-store cost. Repetition 1 is
-# the cold pass and 2..N are warm; the two are never mixed here.
-# cachefs_compare_cold.pdf: per-query runtime, rep 1, one plot per cache_pct.
-# cachefs_compare_warm.pdf: same for the median of reps 2..N.
+# Plot results/cachefs_compare.csv: Linux+cache_httpfs vs OSv+uCache.
+# cachefs_compare.pdf: per-query runtime, 4 bars/query (each system: cold, warm).
 # cachefs_sweep.pdf: total runtime and ratio vs cache_pct.
 # cachefs_compare_diag.pdf: uCache prefetch coverage and cache_httpfs hit ratio.
+from matplotlib.patches import Patch
 from common import *
+
+COLD_ALPHA = 0.55
 
 CSV = os.path.join(result_dir, "cachefs_compare.csv")
 ACCESS_CSV = os.path.join(result_dir, "cachefs_access.csv")
@@ -61,39 +61,46 @@ def _style(ax):
     ax.set_axisbelow(True)
 
 
-def plot_runtime(df, style):
-    """Per-query bars, one panel per cache_pct."""
+def plot_runtime(cold, warm):
+    """Per-query bars, one panel per cache_pct, 4 bars/query: each system's
+    cold bar next to its warm bar, grouped by system in SYSTEM_ORDER."""
+    cold = cold.assign(style="cold")
+    warm = warm.assign(style="warm")
+    df = pd.concat([cold, warm], ignore_index=True)
     if not len(df):
-        print(f"note: no {style} repetitions; skipping cachefs_compare_{style}.pdf")
+        print("note: no repetitions; skipping cachefs_compare.pdf")
         return
+    df["label"] = df["system"] + " " + df["style"]
+    order = [f"{s} {st}" for s in SYSTEM_ORDER for st in ("cold", "warm")]
+    present = [l for l in order if l in set(df["label"])]
     pcts = sorted(df["cache_pct"].unique())
     fig, axes = plt.subplots(len(pcts), 1, sharex=True, squeeze=False,
                              figsize=(figwidth_full, (fig_height + 0.5) * len(pcts)))
     for ax, pct in zip(axes.flat, pcts):
         sub = df[df["cache_pct"] == pct]
-        present = [s for s in SYSTEM_ORDER if s in set(sub["system"])]
-        sns.barplot(data=sub, x="query", y="time", hue="system",
-                    hue_order=present, palette=[COLORS[s] for s in present],
-                    edgecolor="black", linewidth=0.5, ax=ax, legend=(ax is axes.flat[0]))
-        # Texture as well as hue: the pastel pair clears CVD separation but is pale.
-        for bars, s in zip(ax.containers, present):
+        sns.barplot(data=sub, x="query", y="time", hue="label", hue_order=present,
+                    palette=[COLORS[l.split()[0]] for l in present],
+                    edgecolor="black", linewidth=0.5, ax=ax, legend=False)
+        for bars, l in zip(ax.containers, present):
+            system, style = l.split()
             for b in bars:
-                b.set_hatch(HATCH[s])
+                b.set_hatch(HATCH[system])
+                if style == "cold":
+                    b.set_alpha(COLD_ALPHA)
         ax.set_ylabel("Time (s)")
         ax.set_title(f"cache = {pct:g}% of dataset", fontsize=FONTSIZE)
         _style(ax)
     axes.flat[-1].set_xlabel("TPC-H query")
-    fig.suptitle(f"cache_httpfs vs uCache, {style}, " + lower_better_str,
+    fig.suptitle("cache_httpfs vs uCache, cold vs warm, " + lower_better_str,
                  fontsize=FONTSIZE, color="navy", y=1.05)
     fig.tight_layout()
-    # Out of the axes: in the corner it lands on top of the tallest bars.
-    leg = axes.flat[0].get_legend()
-    if leg is not None:
-        handles, labels = axes.flat[0].get_legend_handles_labels()
-        leg.remove()
-        fig.legend(handles, labels, ncol=len(labels), frameon=False,
-                   fontsize=FONTSIZE, loc="lower center", bbox_to_anchor=(0.5, 1.0))
-    out = os.path.join(result_dir, f"cachefs_compare_{style}.pdf")
+    handles = [Patch(facecolor=COLORS[l.split()[0]], edgecolor="black",
+                      hatch=HATCH[l.split()[0]],
+                      alpha=(COLD_ALPHA if l.split()[1] == "cold" else 1.0), label=l)
+               for l in present]
+    fig.legend(handles=handles, ncol=len(handles), frameon=False,
+               fontsize=FONTSIZE, loc="lower center", bbox_to_anchor=(0.5, 1.0))
+    out = os.path.join(result_dir, "cachefs_compare.pdf")
     fig.savefig(out, format="pdf", bbox_inches="tight")
     print("wrote", out)
 
@@ -215,8 +222,7 @@ def main():
 
     df = df.dropna(subset=["time"])
     cold, warm = split_reps(df)
-    plot_runtime(cold, "cold")
-    plot_runtime(warm, "warm")
+    plot_runtime(cold, warm)
     plot_sweep(cold, warm)
     plot_diagnostics(warm if len(warm) else cold)
 
